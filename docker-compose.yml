@@ -1,0 +1,110 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audio_api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Applying migrations...' &&
+        uv run alembic upgrade head &&
+        echo 'Starting FastAPI server...' &&
+        uv run uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audio_worker
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Starting Celery worker...' &&
+        uv run celery -A src.celery.celery.celery_app worker -l info -Q audio_processing -n audio_worker@%h
+      "
+
+  db:
+    image: postgres:17
+    container_name: audio_db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: audio_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    container_name: audio_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  flower:
+    image: mher/flower
+    container_name: audio_flower
+    command: celery --broker=redis://redis:6379/0 flower --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
